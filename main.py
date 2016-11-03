@@ -114,16 +114,19 @@ def get_total_loss(act, target, params, w):
 
 
 # -- load data --
-(X_tr, y_tr), (X_te, y_te) = mnist.load_data()
+from sklearn.datasets import load_digits
+X_tr, y_tr = load_digits(return_X_y=True)
+# (X_tr, y_tr), (X_te, y_te) = mnist.load_data()
 
 def preprocess_dataset(X, y):
-    X = (floatX(X)/255)[:,::7,::7].reshape(-1, 28*28//49)
+    # X = (floatX(X)/255)[:,::7,::7].reshape(-1, 28*28//49)
+    X = (floatX(X)/16).reshape(-1, 8, 8)[:,::1,::1].reshape(-1, 64//1)
     outc = floatX(np.zeros((len(y), 10)))
 
     for i in range(len(y)):
         outc[i, y[i]] = 1.
 
-    X, y, outc = X[:1000], y[:1000], outc[:1000]
+    # X, y, outc = X[:1000], y[:1000], outc[:1000]
 
     X = theano.shared(X)
     y = theano.shared(y.astype('int32'))
@@ -132,13 +135,13 @@ def preprocess_dataset(X, y):
     return X, y, outc
 
 X_tr, y_tr, outc_tr = preprocess_dataset(X_tr, y_tr)
-X_te, y_te, outc_te = preprocess_dataset(X_te, y_te)
+# X_te, y_te, outc_te = preprocess_dataset(X_te, y_te)
 
 # -- model def --
 x = T.matrix('x')
 y = T.ivector('y')
 outc = T.matrix('outc')
-rand_outc = T.matrix('outc')
+rand_outc = T.matrix('rand_outc')
 
 logreg = LogReg(x, (10, X_tr.get_value().shape[-1]))
 logreg2 = LogReg(logreg.a, (outc_tr.get_value().shape[-1], 20))
@@ -149,7 +152,7 @@ from theano.tensor.shared_randomstreams import RandomStreams
 srng = RandomStreams(seed=234)
 
 # loss_samples = get_loss_samples(logreg2.a, outc)
-loss_samples = get_loss_samples(logreg.a, outc)
+loss_samples = get_loss_samples(logreg.a, rand_outc*lambd)
 loss = get_loss(logreg.a, outc)
 err = get_error(get_pred(logreg.a), y)
 
@@ -163,7 +166,7 @@ print_pls = []
 
 for p in params:
     grad += [T.grad(loss, p)]
-    grad2d += [theano.gradient.jacobian(loss_samples, p)]
+    grad2d += [T.jacobian(loss_samples, p)]
     if grad2d[-1].ndim == 2:
         grad2d[-1] = grad2d[-1].dimshuffle(0, 1, 'x')
 
@@ -172,11 +175,12 @@ grad2d_vec = T.concatenate([g.flatten(2).T for g in grad2d]).T
 
 # print_pls += [grad_vec.shape, grad2d_vec.shape]
 # tensor wise: F_p,i,j = sum_k grad2d[p,i,k]*grad2d[p,k,j]
-F = T.batched_dot(grad2d_vec.dimshuffle(0, 1, 'x'), grad2d_vec.dimshuffle(0, 'x', 1))
-F = T.mean(F, 0)
-print_pls += [F.dot(grad_vec).shape, F.shape, rank(F), T.mean(grad_vec**2)**0.5]
+# F = T.batched_dot(grad2d_vec.dimshuffle(0, 1, 'x'), grad2d_vec.dimshuffle(0, 'x', 1))
+# F = T.mean(F, 0)
+F = T.dot(grad2d_vec.T, grad2d_vec)/grad2d_vec.shape[0]
+print_pls += [F.dot(grad_vec).shape, F.shape, rank(F), T.mean(grad_vec**2)**0.5, (F**2).trace()]
 
-new_grad_vec = theano.tensor.slinalg.solve(F+T.identity_like(F)*lambd, grad_vec)
+new_grad_vec = theano.tensor.slinalg.solve(F+T.identity_like(F)*1e-6, grad_vec)
 new_grad = []
 
 offset = 0
@@ -191,14 +195,16 @@ for p in params:
 import theano.printing
 
 outc_tr_shape = outc_tr.get_value().shape
-rand_outc_tr = theano.shared(floatX(nprng.randn(outc_tr_shape[0], outc_tr_shape[1])/np.sqrt(2)))
-print_pls += [T.eq(T.sum(grad2d_vec, 0), 0)]
+rand_outc_tr = theano.shared(floatX(nprng.randn(*outc_tr_shape)*np.sqrt(2)))
+# print_pls += [T.eq(T.sum(grad2d_vec, 0), 0)]
 
 get_params = theano.function(
     inputs=[],
     outputs=params,
     on_unused_input='warn'
 )
+
+print_pls += [new_grad_vec.dot(F.dot(new_grad_vec))/2]
 
 train = theano.function(
     inputs=[lambd],
@@ -225,10 +231,11 @@ eva = theano.function(
     on_unused_input='warn'
 )
 
-c_lambd = 1e-2
+c_lambd = 1/np.sqrt(8)
 for it in range(200):
     old_params = get_params()
     while True:
+    # if True:
         for op, p in zip(old_params, params):
             p.set_value(op)
 
@@ -237,12 +244,13 @@ for it in range(200):
         rho = (t_r[1]-e_v[0])/t_r[0]
 
         print(round(c_lambd, 5), round(rho, 2))
-        RATE = 1.33
+        RATE = 1.50
         if rho < 0.25:
             c_lambd *= RATE
         elif rho > 0.75:
             c_lambd /= RATE
         else:
+            # pass
             break
 
-    print(round(c_lambd, 5), round(rho, 2), t_r[1]-e_v[0], t_r)
+    print(round(c_lambd, 9), round(rho, 2), t_r[1]-e_v[0], t_r)
