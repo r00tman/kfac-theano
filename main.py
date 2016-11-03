@@ -6,10 +6,14 @@ import numpy as np
 import numpy.linalg
 import numpy.random as nprng
 
+import scipy.linalg
+
 import theano
 import theano.gradient
 import theano.tensor.slinalg
 import theano.tensor as T
+import theano.printing
+import theano.sandbox.cuda.cusolver
 from theano.tensor.nlinalg import matrix_inverse
 
 os.environ['KERAS_BACKEND'] = 'theano'
@@ -17,8 +21,9 @@ from keras.datasets import mnist
 
 import theano.gof
 
-theano.config.floatX = "float64"
+# theano.config.floatX = "float32"
 print(theano.config.floatX)
+theano.config.warn_float64 = 'pdb'
 
 
 class Rank(theano.gof.Op):
@@ -53,7 +58,50 @@ class Rank(theano.gof.Op):
 
     def __str__(self):
         return "Rank"
+
 rank = Rank()
+
+
+class SolveSymPos(theano.gof.Op):
+    """
+    Solve a positive symmetrical system of linear equations.
+    """
+
+    __props__ = ()
+
+    def __init__(self):
+        pass
+
+    def __repr__(self):
+        return 'SolveSymPos{%s}' % str(self._props())
+
+    def make_node(self, A, b):
+        A = T.as_tensor_variable(A)
+        b = T.as_tensor_variable(b)
+        assert A.ndim == 2
+        assert b.ndim in [1, 2]
+        otype = T.tensor(
+            broadcastable=b.broadcastable,
+            dtype=(A * b).dtype)
+        return theano.gof.Apply(self, [A, b], [otype])
+
+    def perform(self, node, inputs, output_storage):
+        A, b = inputs
+        print(A, b)
+        rval = scipy.linalg.solve(A, b, sym_pos=True)
+        output_storage[0][0] = rval
+
+    # computes shape of x where x = inv(A) * b
+    def infer_shape(self, node, shapes):
+        Ashape, Bshape = shapes
+        rows = Ashape[1]
+        if len(Bshape) == 1:  # b is a Vector
+            return [(rows,)]
+        else:
+            cols = Bshape[1]  # b is a Matrix
+            return [(rows, cols)]
+
+solve_sym_pos = SolveSymPos()  # general solve
 
 
 def floatX(a):
@@ -91,7 +139,8 @@ class LogReg:
 
 
 def get_loss_samples(act, target):
-    return T.mean((act - target)**2/2, 1)
+    res = T.mean((act - target)**2/2, 1)
+    return res
 
 
 def get_loss(act, target):
@@ -106,7 +155,7 @@ def get_regularizer(params, w=1e-5):
 
 
 def get_error(pred, target):
-    return T.mean(T.neq(pred, target))
+    return T.mean(T.neq(pred, target), dtype=theano.config.floatX)
 
 
 def get_total_loss(act, target, params, w):
@@ -126,7 +175,7 @@ def preprocess_dataset(X, y):
     for i in range(len(y)):
         outc[i, y[i]] = 1.
 
-    # X, y, outc = X[:1000], y[:1000], outc[:1000]
+    # X, y, outc = X[:1200], y[:1200], outc[:1200]
 
     X = theano.shared(X)
     y = theano.shared(y.astype('int32'))
@@ -144,19 +193,20 @@ outc = T.matrix('outc')
 rand_outc = T.matrix('rand_outc')
 
 logreg = LogReg(x, (10, X_tr.get_value().shape[-1]))
-logreg2 = LogReg(logreg.a, (outc_tr.get_value().shape[-1], 20))
+logreg2 = LogReg(logreg.a, (outc_tr.get_value().shape[-1], 10))
 
 lambd = T.scalar('lambd')
+lambd_inv = T.scalar('lambd_inv')
 # -- target def --
 from theano.tensor.shared_randomstreams import RandomStreams
 srng = RandomStreams(seed=234)
 
 # loss_samples = get_loss_samples(logreg2.a, outc)
-loss_samples = get_loss_samples(logreg.a, rand_outc*lambd)
-loss = get_loss(logreg.a, outc)
-err = get_error(get_pred(logreg.a), y)
+loss_samples = get_loss_samples(logreg2.a, rand_outc*lambd)
+loss = get_loss(logreg2.a, outc)
+err = get_error(get_pred(logreg2.a), y)
 
-params = logreg.params  # + logreg2.params
+params = logreg.params + logreg2.params
 
 grad = []
 grad2d = []
@@ -177,10 +227,14 @@ grad2d_vec = T.concatenate([g.flatten(2).T for g in grad2d]).T
 # tensor wise: F_p,i,j = sum_k grad2d[p,i,k]*grad2d[p,k,j]
 # F = T.batched_dot(grad2d_vec.dimshuffle(0, 1, 'x'), grad2d_vec.dimshuffle(0, 'x', 1))
 # F = T.mean(F, 0)
-F = T.dot(grad2d_vec.T, grad2d_vec)/grad2d_vec.shape[0]
-print_pls += [F.dot(grad_vec).shape, F.shape, rank(F), T.mean(grad_vec**2)**0.5, (F**2).trace()]
+F = T.dot(grad2d_vec.T, grad2d_vec)/T.cast(grad2d_vec.shape[0], theano.config.floatX)
+print_pls += [F.dot(grad_vec).shape, F.shape, rank(F*10000), (F**2).trace()]
 
-new_grad_vec = theano.tensor.slinalg.solve(F+T.identity_like(F)*1e-6, grad_vec)
+Fdamp = F+T.identity_like(F)*lambd_inv
+# new_grad_vec = theano.tensor.slinalg.solve(Fdamp, grad_vec.dimshuffle(0, 'x'))
+# new_grad_vec = solve_sym_pos(Fdamp, grad_vec)
+new_grad_vec = theano.sandbox.cuda.cusolver.gpu_solve(Fdamp*10000, grad_vec.dimshuffle(0, 'x')*10000)
+
 new_grad = []
 
 offset = 0
@@ -192,8 +246,6 @@ for p in params:
     updates[p] = p - new_grad[-1]
 
 # -- combining --
-import theano.printing
-
 outc_tr_shape = outc_tr.get_value().shape
 rand_outc_tr = theano.shared(floatX(nprng.randn(*outc_tr_shape)*np.sqrt(2)))
 # print_pls += [T.eq(T.sum(grad2d_vec, 0), 0)]
@@ -204,11 +256,11 @@ get_params = theano.function(
     on_unused_input='warn'
 )
 
-print_pls += [new_grad_vec.dot(F.dot(new_grad_vec))/2]
+print_pls += [new_grad_vec.T.dot(F.dot(new_grad_vec))/2, T.mean(grad_vec**2)**0.5]
 
 train = theano.function(
-    inputs=[lambd],
-    outputs=[new_grad_vec.dot(F.dot(new_grad_vec))/2+grad_vec.dot(new_grad_vec), loss, err] + print_pls,
+    inputs=[lambd, lambd_inv],
+    outputs=[new_grad_vec.T.dot(F.dot(new_grad_vec))/2+grad_vec.dot(new_grad_vec), loss, err] + print_pls,
     updates=updates,
     givens={
         x: X_tr,
@@ -216,7 +268,8 @@ train = theano.function(
         outc: outc_tr,
         rand_outc: rand_outc_tr
     },
-    on_unused_input='warn'
+    on_unused_input='warn',
+    allow_input_downcast=True
 )
 
 eva = theano.function(
@@ -231,26 +284,39 @@ eva = theano.function(
     on_unused_input='warn'
 )
 
-c_lambd = 1/np.sqrt(8)
+c_lambd = 2 # 1/np.sqrt(8)
+c_lambd_inv = 1e-4
 for it in range(200):
+    rand_outc_tr.set_value(floatX(nprng.randn(*outc_tr_shape)*np.sqrt(2)))
     old_params = get_params()
+    what = np.random.random() < 0.5
+    print('l' if what else 'i')
     while True:
     # if True:
         for op, p in zip(old_params, params):
             p.set_value(op)
 
-        t_r = train(c_lambd)
+        t_r = train(c_lambd, c_lambd_inv)
         e_v = eva()
-        rho = (t_r[1]-e_v[0])/t_r[0]
+        rho = (t_r[1]-e_v[0])/t_r[0][0][0]
 
         print(round(c_lambd, 5), round(rho, 2))
-        RATE = 1.50
+        RATE = 1.10
         if rho < 0.25:
-            c_lambd *= RATE
+            if what or True:
+                c_lambd *= RATE
+                # c_lambd_inv *= RATE
+            else:
+                c_lambd_inv *= RATE**4
         elif rho > 0.75:
-            c_lambd /= RATE
+            if what and False:
+                c_lambd /= RATE
+            else:
+                c_lambd /= RATE
+                c_lambd_inv /= RATE**4
         else:
             # pass
             break
 
-    print(round(c_lambd, 9), round(rho, 2), t_r[1]-e_v[0], t_r)
+    print(round(c_lambd_inv, 9), round(c_lambd, 9), round(rho, 2), t_r[1]-e_v[0], t_r[0], t_r[1:])
+    # c_lambd_inv /= 1.1
