@@ -80,7 +80,7 @@ class SolveSymPos(theano.gof.Op):
 
     def perform(self, node, inputs, output_storage):
         A, b = inputs
-        print(A, b)
+        # print(A, b)
         rval = scipy.linalg.solve(A, b, sym_pos=True)
         output_storage[0][0] = rval
 

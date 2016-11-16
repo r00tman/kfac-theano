@@ -6,7 +6,7 @@ def get_pred(act):
     return T.argmax(act, axis=1)
 
 def get_loss_samples(act, target):
-    res = T.mean((act - target)**2/2, 1)
+    res = T.sum((act - target)**2/2, 1)
     return res
 
 
