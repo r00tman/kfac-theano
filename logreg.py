@@ -13,19 +13,22 @@ class LogReg:
 
         self.W = theano.shared(
             value=floatX(nprng.randn(shape[0], shape[1])*np.sqrt(2/shape[1])),
+            # value=floatX(nprng.randn(shape[0], shape[1])*np.sqrt(2/(shape[1] + shape[0]))),
             name='W',
             borrow=True
         )
 
-        self.b = theano.shared(
-            value=floatX(nprng.randn(shape[0])*np.sqrt(2/shape[0])),
-            name='b',
-            borrow=True
-        )
+        # self.b = theano.shared(
+        #     value=floatX(nprng.randn(shape[0])*np.sqrt(2/shape[0])),
+        #     name='b',
+        #     borrow=True
+        # )
 
-        self.s = T.dot(self.W, inp.T).T + self.b
+        # self.s = T.dot(self.W, inp.T).T + self.b
+        self.s = T.dot(self.W, inp.T).T
         self.a = act(self.s)
 
-        self.params = [self.W, self.b]
+        # self.params = [self.W, self.b]
+        self.params = [self.W]
 
         self.inp = inp

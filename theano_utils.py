@@ -5,10 +5,16 @@ import scipy.linalg
 import theano
 import theano.tensor as T
 import theano.gof
+import theano.compile
+import theano.gradient
 
 
 def floatX(a):
     return np.asarray(a, dtype=theano.config.floatX)
+
+
+def scalar_floatX(a):
+    return T.cast(a, theano.config.floatX)
 
 
 def shared_empty(dim=2, dtype=None):
@@ -95,3 +101,65 @@ class SolveSymPos(theano.gof.Op):
             return [(rows, cols)]
 
 solve_sym_pos = SolveSymPos()  # solve sym_pos
+
+class FastKron(theano.gof.Op):
+    """
+    kron(A,B)
+    """
+
+    __props__ = ()
+
+    def __init__(self):
+        pass
+
+    def __repr__(self):
+        return 'FastKron{%s}' % str(self._props())
+
+    def make_node(self, A, B):
+        A = T.as_tensor_variable(A)
+        B = T.as_tensor_variable(B)
+        assert A.ndim in [2, 3]
+        assert B.ndim in [2, 3]
+        assert A.ndim == B.ndim
+        otype = T.tensor(
+            broadcastable=B.broadcastable,
+            dtype=(A * B).dtype)
+        return theano.gof.Apply(self, [A, B], [otype])
+
+    def perform(self, node, inputs, output_storage):
+        A, B = inputs
+        if len(A.shape) == 2:
+            res = np.kron(A, B)
+        else:
+            res = np.einsum('ijk,ibc->ijbkc', B, A).reshape((B.shape[0], A.shape[1]*B.shape[1], -1)).mean(0)[None, :]
+
+        rval = res
+        print(A.shape, B.shape, res.shape)
+        output_storage[0][0] = rval
+
+    # computes shape of x where x = inv(A) * b
+    def infer_shape(self, node, shapes):
+        Ashape, Bshape = shapes
+        shape = (Ashape[-2]*Bshape[-2], Ashape[-1]*Bshape[-1])
+        if len(Ashape) == 3:
+            shape = (1,)+shape
+        return [shape]
+
+fast_kron = FastKron()
+
+def native_kron(a, b):
+    return T.batched_tensordot(b, a, [[], []]).dimshuffle(0, 1, 3, 2, 4).reshape((a.shape[0], a.shape[1]*b.shape[1], -1)).mean(0, keepdims=True)
+
+
+class MyConsiderConstant(theano.compile.ViewOp):
+    def R_op(self, inputs, eval_points):
+        if eval_points[0] is None:
+            return eval_points
+        return self.grad(inputs, eval_points)
+
+
+    def grad(self, args, g_outs):
+        return [g_out.zeros_like(g_out) for g_out in g_outs]
+
+
+my_consider_constant = MyConsiderConstant()
