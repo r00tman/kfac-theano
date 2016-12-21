@@ -19,5 +19,5 @@ For now, K-FAC is assumed to be block-diagonal KR Fisher with rescaling and mome
 * `python3 main.py` will train the model and log some stats to a .csv file in `tests/` directory
 * To view plots you can use provided `plt_adv.py` script like
 
-      ./plt_adv.py loss,grad_mean tests/test_digits_1500_div_2_classify_16-15-15-10_*
+        ./plt_adv.py loss,grad_mean tests/test_digits_1500_div_2_classify_16-15-15-10_*
 
